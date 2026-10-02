@@ -12,6 +12,7 @@ Requirements:  python-evdev, pyserial, write access to /dev/uinput
 
 import argparse
 import os
+import signal
 import sys
 import time
 
@@ -358,8 +359,20 @@ def main():
         state["axes"], state["buttons"] = axes, btns
         vjoy.update(axes, btns)
 
+    # Ctrl+C / SIGTERM just set a flag so the loop exits and cleanup always runs.
+    # (A PyInstaller one-file build gets SIGINT twice: from the terminal and
+    # forwarded by its bootloader - a KeyboardInterrupt would hit the cleanup.)
+    stop = False
+
+    def request_stop(signum, frame):
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+
     try:
-        while True:
+        while not stop:
             data = ser.read(max(1, ser.in_waiting))
             now = time.monotonic()
             for ch, failsafe in parser.feed(data):
@@ -383,8 +396,6 @@ def main():
             if not args.quiet and now >= next_draw:
                 draw(state, args, vjoy)
                 next_draw = now + 0.05
-    except KeyboardInterrupt:
-        pass
     except serial.SerialException as ex:
         print(f"\nserial error: {ex}", file=sys.stderr)
     finally:
@@ -395,4 +406,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:      # Ctrl+C during startup / protocol auto-detect
+        sys.exit(130)
