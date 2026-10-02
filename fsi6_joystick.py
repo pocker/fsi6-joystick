@@ -399,6 +399,10 @@ def main():
     except serial.SerialException as ex:
         print(f"\nserial error: {ex}", file=sys.stderr)
     finally:
+        # late/duplicate signals must not kill us during cleanup or interpreter
+        # shutdown (Python resets Python-level handlers to default at exit)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         if not args.quiet:
             sys.stdout.write(f"{CSI}?25h\n")
         vjoy.close()
