@@ -177,3 +177,9 @@ pyinstaller --onefile --name fsi6-joystick fsi6_joystick.py
 
 Pushing a tag `vX.Y.Z` runs the GitHub Action that builds the executable and attaches it
 to a GitHub release.
+
+---
+
+## License
+
+[MIT](LICENSE)
