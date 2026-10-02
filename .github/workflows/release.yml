@@ -1,0 +1,47 @@
+name: Build release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # older Ubuntu = older glibc, so the binary runs on more distros
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build executable
+        run: |
+          pyinstaller --onefile --name fsi6-joystick fsi6_joystick.py
+          ./dist/fsi6-joystick --help
+          cd dist && tar czf fsi6-joystick-linux-x86_64.tar.gz fsi6-joystick
+          sha256sum fsi6-joystick-linux-x86_64.tar.gz > fsi6-joystick-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fsi6-joystick-linux-x86_64
+          path: dist/fsi6-joystick-linux-x86_64.tar.gz*
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/fsi6-joystick-linux-x86_64.tar.gz \
+            dist/fsi6-joystick-linux-x86_64.tar.gz.sha256 \
+            --title "$GITHUB_REF_NAME" --generate-notes
