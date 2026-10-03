@@ -11,15 +11,19 @@ Requirements:  python-evdev, pyserial, write access to /dev/uinput
 """
 
 import argparse
+import json
 import os
+import select
 import signal
 import sys
+import termios
 import time
 
 try:
     import serial
 except ImportError:
     sys.exit("pyserial missing:  sudo pacman -S python-pyserial   (or: pip install pyserial)")
+from serial.tools import list_ports
 try:
     from evdev import UInput, AbsInfo, ecodes as e
 except ImportError:
@@ -213,6 +217,148 @@ def draw(state, args, vjoy):
 
 
 # --------------------------------------------------------------------------
+# Serial port picker + remembered last device
+# --------------------------------------------------------------------------
+
+CONFIG_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                           "fsi6-joystick", "last_device.json")
+
+
+def serial_ports(show_all=False):
+    """Connected serial ports; legacy on-board /dev/ttyS* without hardware are hidden."""
+    ports = [p for p in list_ports.comports() if show_all or p.hwid != "n/a"]
+    return sorted(ports, key=lambda p: p.device)
+
+
+def port_label(p):
+    desc = " ".join(x for x in (p.manufacturer, p.product) if x) or p.description
+    if desc == p.name or desc == "n/a":
+        desc = ""
+    ids = f"{p.vid:04x}:{p.pid:04x}" if p.vid is not None else ""
+    return f"{p.device:<14} {desc}  {ids}".rstrip()
+
+
+def same_device(p, last):
+    """USB adapters can come back as a different ttyUSBn/ttyACMn; match them by
+    VID/PID/serial number when available, by device path otherwise."""
+    if last.get("serial_number") and p.serial_number:
+        return (p.vid, p.pid, p.serial_number) == \
+            (last.get("vid"), last.get("pid"), last["serial_number"])
+    return p.device == last.get("device")
+
+
+def load_last_device():
+    try:
+        with open(CONFIG_FILE) as f:
+            last = json.load(f)
+        return last if isinstance(last, dict) and last.get("device") else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_last_device(port):
+    real = os.path.realpath(port)
+    info = {"device": port, "vid": None, "pid": None, "serial_number": None}
+    for p in list_ports.comports():
+        if p.device == real:
+            info.update(vid=p.vid, pid=p.pid, serial_number=p.serial_number)
+            break
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(info, f, indent=2)
+    except OSError:
+        pass                        # remembering the port is a convenience only
+
+
+def can_open(port):
+    try:
+        serial.Serial(port).close()
+        return None
+    except serial.SerialException as ex:
+        return str(ex)
+
+
+def pick_port(last=None, note=""):
+    """Arrow-key menu on the terminal; refreshes every second so a freshly plugged-in
+    adapter shows up. Returns the device path, or exits on q / Esc / Ctrl+C."""
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    new = termios.tcgetattr(fd)
+    # no line buffering/echo; Ctrl+C arrives as a byte instead of a signal
+    new[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+    show_all, sel_dev, chosen = False, None, None
+    sys.stdout.write(f"{CSI}?1049h{CSI}?25l")     # alternate screen, hide cursor
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, new)
+        while chosen is None:
+            ports = serial_ports(show_all)
+            devs = [p.device for p in ports]
+            if sel_dev not in devs:
+                sel_dev = next((p.device for p in ports if last and same_device(p, last)),
+                               devs[0] if devs else None)
+            sel = devs.index(sel_dev) if sel_dev else 0
+
+            lines = [f"{CSI}1mFS-i6 joystick emulator - select the serial port{CSI}0m", ""]
+            if note:
+                lines += [f" {CSI}33m{note}{CSI}0m", ""]
+            if not ports:
+                lines.append(" (no serial ports found - plug in the USB-UART adapter)")
+            for i, p in enumerate(ports):
+                mark = "  (last used)" if last and same_device(p, last) else ""
+                text = f"{i + 1:>2}. {port_label(p)}{mark}"
+                lines.append(f" {CSI}7m{text}{CSI}0m" if i == sel else f" {text}")
+            lines += ["", f" {CSI}2mUp/Down select   Enter connect   1-9 quick pick   "
+                          f"a {'hide' if show_all else 'show'} all ports   q quit{CSI}0m"]
+            sys.stdout.write(f"{CSI}H" + "\n".join(l + f"{CSI}K" for l in lines) + f"{CSI}J")
+            sys.stdout.flush()
+
+            if not select.select([fd], [], [], 1.0)[0]:
+                continue                                  # timeout -> rescan ports
+            key = os.read(fd, 16).decode(errors="ignore")
+            if key in ("q", "Q", "\x1b", "\x03", "\x04"):
+                break
+            if key in ("\x1b[A", "\x1bOA", "k") and ports:
+                sel_dev = devs[(sel - 1) % len(devs)]
+            elif key in ("\x1b[B", "\x1bOB", "j") and ports:
+                sel_dev = devs[(sel + 1) % len(devs)]
+            elif key in ("\r", "\n") and ports:
+                chosen = sel_dev
+            elif key.isdigit() and 1 <= int(key) <= len(devs):
+                chosen = devs[int(key) - 1]
+            elif key in ("a", "A"):
+                show_all = not show_all
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write(f"{CSI}?25h{CSI}?1049l")
+        sys.stdout.flush()
+    if chosen is None:
+        sys.exit(130)
+    return chosen
+
+
+def choose_port(force_menu):
+    """No port on the command line: reconnect to the last used device if it's
+    plugged in, otherwise (or with --select) show the picker."""
+    last = load_last_device()
+    note = ""
+    if last and not force_menu:
+        match = next((p for p in serial_ports(True) if same_device(p, last)), None)
+        if match:
+            err = can_open(match.device)
+            if err is None:
+                print(f"using last device {match.device}   (--select to choose another)")
+                return match.device
+            note = f"last device {match.device} cannot be opened: {err}"
+        else:
+            note = f"last device {last['device']} is not connected"
+    if not sys.stdin.isatty():
+        ports = "\n".join("  " + port_label(p) for p in serial_ports()) or "  (none)"
+        sys.exit(f"no serial port given and no terminal for the picker. Ports:\n{ports}")
+    return pick_port(last, note)
+
+
+# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 
@@ -260,6 +406,8 @@ def main():
                     "style joystick for drone simulators.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
+  %(prog)s                                     # reconnect to the last device, or pick one
+  %(prog)s --select                            # always show the port picker
   %(prog)s /dev/ttyUSB0                        # auto-detect protocol
   %(prog)s /dev/ttyUSB0 -p ibus                # FS-iA6B / FS-iA10B iBUS servo port
   %(prog)s /dev/ttyUSB0 -p sbus                # SBUS (needs an inverted signal!)
@@ -267,7 +415,11 @@ def main():
   %(prog)s /dev/ttyUSB0 -i 2                   # invert axis #2 (Y)
   %(prog)s /dev/ttyUSB0 -b 5,6                 # also expose CH5,CH6 as buttons (>1500us = on)
 """)
-    ap.add_argument("port", help="serial device, e.g. /dev/ttyUSB0 or /dev/ttyACM0")
+    ap.add_argument("port", nargs="?",
+                    help="serial device, e.g. /dev/ttyUSB0 or /dev/ttyACM0 (default: the "
+                         "last used device if connected, otherwise a picker menu)")
+    ap.add_argument("-s", "--select", action="store_true",
+                    help="show the serial port picker even if the last device is connected")
     ap.add_argument("-p", "--protocol", choices=["auto", "ibus", "sbus"], default="auto")
     ap.add_argument("-m", "--map", default="1,2,3,4,5,6,7,8,9,10",
                     help="comma-separated 1-based channels -> axes X,Y,Z,RX,RY,RZ,THR,RUD,... "
@@ -303,6 +455,9 @@ def main():
     if len(args.buttons) > 16:
         sys.exit("at most 16 buttons")
 
+    if args.port is None:
+        args.port = choose_port(args.select)
+
     proto = args.protocol
     if proto == "auto":
         print(f"auto-detecting protocol on {args.port} ...")
@@ -325,6 +480,7 @@ def main():
         ser = open_serial(args.port, proto)
     except serial.SerialException as ex:
         sys.exit(f"cannot open {args.port}: {ex}")
+    save_last_device(args.port)
 
     try:
         vjoy = VirtualFSi6(len(args.map), args.name, args.vid, args.pid, len(args.buttons))

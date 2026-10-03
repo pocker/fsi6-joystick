@@ -104,6 +104,8 @@ To load `uinput` at boot: `echo uinput | sudo tee /etc/modules-load.d/uinput.con
 ## Usage
 
 ```bash
+fsi6-joystick                               # reconnect to the last device, or pick one from a menu
+fsi6-joystick --select                      # always show the port picker
 fsi6-joystick /dev/ttyUSB0                  # auto-detect iBUS / SBUS
 fsi6-joystick /dev/ttyUSB0 -p ibus          # force iBUS
 fsi6-joystick /dev/ttyUSB0 -p sbus          # force SBUS (signal must be inverted, see above!)
@@ -112,6 +114,27 @@ fsi6-joystick /dev/ttyUSB0 -i 2             # invert axis #2
 fsi6-joystick /dev/ttyUSB0 -b 5,6           # also expose CH5, CH6 as buttons (>1500 µs = on)
 fsi6-joystick /dev/ttyUSB0 --failsafe-center  # on signal loss: center sticks, throttle low
 ```
+
+### Choosing the serial port
+
+If you run it without a port, it reconnects to the last device you used, as long as that
+device is plugged in. USB adapters are matched by VID/PID and serial number, so it still
+works when the adapter comes back as a different `ttyUSBn`/`ttyACMn`. If the device isn't
+connected, or you pass `--select`, a small menu opens instead:
+
+```
+FS-i6 joystick emulator - select the serial port
+
+ 1. /dev/ttyACM0   Arduino (www.arduino.cc)  2341:0043  (last used)
+ 2. /dev/ttyUSB0   Silicon Labs CP2102 USB to UART Bridge Controller  10c4:ea60
+
+ Up/Down select   Enter connect   1-9 quick pick   a show all ports   q quit
+```
+
+The list refreshes every second, so you can plug the adapter in while the menu is open.
+`a` also shows the on-board `/dev/ttyS*` ports, which are hidden by default. The last
+device is saved in `~/.config/fsi6-joystick/last_device.json` every time a port opens
+successfully, including one you name on the command line.
 
 Example of the live display. It shows every channel in µs, a position bar, the axis value, the frame
 rate and the link status (`OK` / `FAILSAFE` / `NO SIGNAL`):
@@ -131,7 +154,8 @@ status: OK         rate: 142.9 Hz   frames: 15023    bad: 0
 
 | Option | Default | Description |
 |---|---|---|
-| `port` | (required) | Serial device, e.g. `/dev/ttyUSB0`, `/dev/ttyACM0` |
+| `port` | last device / menu | Serial device, e.g. `/dev/ttyUSB0`, `/dev/ttyACM0` |
+| `-s, --select` | off | Show the port picker even if the last device is connected |
 | `-p, --protocol` | `auto` | `auto`, `ibus` or `sbus` |
 | `-m, --map` | `1,…,10` | Channels (1-based) mapped in order to axes X, Y, Z, RX, RY, RZ, THR, RUD, WHL, GAS, BRK, MISC (max 12) |
 | `-i, --invert` | (none) | Axis positions (1-based) to invert |
